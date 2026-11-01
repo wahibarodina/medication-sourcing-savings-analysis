@@ -1,11 +1,20 @@
--- Medication Sourcing Savings Analysis - BigQuery Standard SQL
--- Project: medication-sourcing-portfolio | Dataset: med_sourcing (US)
--- Limits: CMS is gross Part D claim cost, not acquisition cost. The manufacturer
--- spread is a proxy, not manufacturer-specific NADAC pricing. The 100% reference
--- gap is mechanical, not realized savings.
+-- Medication Sourcing Savings Analysis
+-- Written for BigQuery Standard SQL.
+-- Before running: load the CMS Part D 2024 CSV as cms_part_d_2024 and the NADAC
+-- weekly CSV as nadac_2026_raw, then replace medication-sourcing-portfolio with
+-- your own Google Cloud project ID.
+--
+-- Keep in mind while reading the results:
+--   * CMS spending is what was billed (gross claim cost), not what pharmacies paid.
+--   * The manufacturer comparison uses CMS spending per unit as a stand-in, because
+--     NADAC prices don't say which manufacturer made the drug.
+--   * The "100% gap" assumes every possible switch happens. It's a ceiling, not a forecast.
 
--- One-time normalization after the CSV loader preserved NADAC header spaces.
--- Rename the uploaded table from nadac_2026 to nadac_2026_raw before this step.
+-- Setup: clean up the NADAC column names.
+-- The NADAC file has spaces in its column headers ("NADAC Per Unit"), which are
+-- awkward to query. This copies the raw table into a new one with underscore names,
+-- turns prices into numbers, and pads NDCs back to 11 digits (leading zeros get
+-- dropped when the CSV loads).
 CREATE OR REPLACE TABLE `medication-sourcing-portfolio.med_sourcing.nadac_2026` AS
 SELECT
   `NDC Description` AS NDC_Description,
@@ -22,7 +31,9 @@ SELECT
   CAST(`As of Date` AS STRING) AS As_of_Date
 FROM `medication-sourcing-portfolio.med_sourcing.nadac_2026_raw`;
 
--- Query 1 of 10: Profile CMS grain and row roles.
+-- Query 1: What does one row of the CMS file represent?
+-- Counts total rows, distinct drugs, and how many rows are "Overall" totals versus
+-- manufacturer detail. This tells us we must never add the two kinds together.
 CREATE OR REPLACE TABLE `medication-sourcing-portfolio.med_sourcing.q01_cms_profile` AS
 SELECT
   COUNT(*) AS row_count,
@@ -33,7 +44,9 @@ SELECT
   MAX(Tot_Spndng_2024) AS max_2024_spend
 FROM `medication-sourcing-portfolio.med_sourcing.cms_part_d_2024`;
 
--- Query 2 of 10: Reconcile manufacturer detail to each Overall control row.
+-- Query 2: Do the manufacturer rows add up to the Overall row?
+-- For each drug, sums spend and units across manufacturers and compares them to the
+-- Overall row. A result near 0% means the detail rows are complete and safe to use.
 CREATE OR REPLACE TABLE `medication-sourcing-portfolio.med_sourcing.q02_manufacturer_reconciliation` AS
 WITH tagged AS (
   SELECT
@@ -55,7 +68,9 @@ SELECT
   SAFE_DIVIDE(detail_units, overall_units) - 1 AS unit_reconciliation_pct
 FROM reconciled WHERE overall_spend IS NOT NULL;
 
--- Query 3 of 10: Confirm the latest NADAC snapshot and NDC uniqueness.
+-- Query 3: Which NADAC week is the latest, and is each NDC listed only once in it?
+-- The NADAC file stacks every weekly update. We only want the newest week, and in that
+-- week each NDC should appear once. duplicate_ndc_rows should be 0.
 CREATE OR REPLACE TABLE `medication-sourcing-portfolio.med_sourcing.q03_nadac_snapshot` AS
 WITH parsed AS (
   SELECT *, SAFE.PARSE_DATE('%m/%d/%Y', As_of_Date) AS as_of_date_parsed
@@ -69,7 +84,9 @@ SELECT
 FROM parsed CROSS JOIN latest
 WHERE as_of_date_parsed = max_as_of_date GROUP BY max_as_of_date;
 
--- Query 4 of 10: Quantify current NADAC exclusions used in the match.
+-- Query 4: How many NADAC rows do the matching rules remove, and why?
+-- Counts rows dropped for being over-the-counter, for using a unit other than "EA"
+-- (each, e.g. one tablet), or for having no price. Documents what was excluded.
 CREATE OR REPLACE TABLE `medication-sourcing-portfolio.med_sourcing.q04_nadac_exclusions` AS
 WITH current AS (
   SELECT * FROM `medication-sourcing-portfolio.med_sourcing.nadac_2026`
@@ -86,7 +103,11 @@ SELECT
   COUNTIF(UPPER(TRIM(OTC)) = 'N' AND UPPER(TRIM(Pricing_Unit)) = 'EA' AND NADAC_Per_Unit > 0) AS eligible_current_rows
 FROM current;
 
--- Query 5 of 10: Generate exact normalized name-prefix match candidates.
+-- Query 5: Match CMS drugs to NADAC products by name.
+-- The two datasets share no ID, so we match on names. Both names are cleaned the same
+-- way (uppercase, punctuation removed) and a NADAC description must start with the CMS
+-- brand name. Names under 4 characters are skipped to avoid false matches. Only drugs
+-- whose matches all use the "EA" unit are kept, so prices are comparable.
 CREATE OR REPLACE TABLE `medication-sourcing-portfolio.med_sourcing.match_candidates` AS
 WITH cms AS (
   SELECT
@@ -126,7 +147,10 @@ WITH cms AS (
 )
 SELECT m.* FROM matched m JOIN ea_only USING (drug_key);
 
--- Query 6 of 10: Calculate brand-to-generic NDC-level reference gaps.
+-- Query 6: Scenario A, brand to generic.
+-- For each brand NDC, the gap is 1 minus (generic price / brand price). We take the
+-- median gap across that brand's NDCs and apply it to the brand's CMS spending.
+-- Example: a 0.95 gap on $100M of spend gives a $95M reference gap.
 CREATE OR REPLACE TABLE `medication-sourcing-portfolio.med_sourcing.brand_scenarios` AS
 WITH eligible AS (
   SELECT *, 1 - SAFE_DIVIDE(generic_nadac_per_unit, nadac_per_unit) AS gap_rate
@@ -168,7 +192,12 @@ SELECT
 FROM grouped g JOIN pct p USING (drug_key)
 WHERE p.reference_savings_rate > 0 AND p.reference_savings_rate < 1;
 
--- Query 7 of 10: Calculate the manufacturer-spread proxy after workbook gates.
+-- Query 7: Scenario B, consolidate to the cheapest manufacturer.
+-- For generics made by several manufacturers, compares the drug's average spend per
+-- unit to the lowest-cost manufacturer's spend per unit. Filters make the comparison
+-- fair: only one NADAC product description (same strength and form), manufacturer rows
+-- with at least 1% of units and 1,000 units, no multi-route drugs (marked *), and detail
+-- rows that reconcile to the Overall row within 0.5%.
 CREATE OR REPLACE TABLE `medication-sourcing-portfolio.med_sourcing.manufacturer_scenarios` AS
 WITH generic_rows AS (
   SELECT * FROM `medication-sourcing-portfolio.med_sourcing.match_candidates`
@@ -230,7 +259,10 @@ WHERE e.price_rank = 1 AND e.eligible_manufacturer_count >= 2
   AND ABS(SAFE_DIVIDE(r.detail_spend, g.cms_2024_spend) - 1) <= 0.005
   AND ABS(SAFE_DIVIDE(r.detail_units, g.cms_2024_dosage_units) - 1) <= 0.005;
 
--- Query 8 of 10: Select 25 cases per scenario without overlap.
+-- Query 8: Pick the final 50 drugs.
+-- Takes the top 25 brand-to-generic cases by spend, then the top 25 manufacturer cases
+-- that aren't already in the first group, so no drug is counted twice. Also adds the
+-- 25%, 50% and 75% realization amounts for each drug.
 CREATE OR REPLACE TABLE `medication-sourcing-portfolio.med_sourcing.selected_50` AS
 WITH brand_25 AS (
   SELECT * FROM `medication-sourcing-portfolio.med_sourcing.brand_scenarios`
@@ -251,7 +283,8 @@ SELECT
   reference_savings_100pct * 0.75 AS savings_75pct_realization
 FROM combined;
 
--- Query 9 of 10: Produce five realization scenarios.
+-- Query 9: Sensitivity table.
+-- Shows the total gap if 0%, 25%, 50%, 75% or 100% of it were actually captured.
 CREATE OR REPLACE TABLE `medication-sourcing-portfolio.med_sourcing.q09_sensitivity` AS
 WITH realization AS (SELECT pct FROM UNNEST([0.00, 0.25, 0.50, 0.75, 1.00]) AS pct)
 SELECT
@@ -261,7 +294,10 @@ SELECT
 FROM realization CROSS JOIN `medication-sourcing-portfolio.med_sourcing.selected_50` s
 GROUP BY pct ORDER BY pct;
 
--- Query 10 of 10: Final QA and workbook reconciliation assertions.
+-- Query 10: Final checks.
+-- Each row is one test with passed = true or false. Confirms 50 drugs, no duplicates,
+-- a 25/25 split, all gaps positive, the right NADAC week, and that the totals match the
+-- Excel workbook. Every row should show passed = true.
 CREATE OR REPLACE TABLE `medication-sourcing-portfolio.med_sourcing.q10_qa_assertions` AS
 SELECT 'selected row count = 50' AS check_name, COUNT(*) = 50 AS passed,
   CAST(COUNT(*) AS STRING) AS observed, '50' AS expected
