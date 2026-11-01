@@ -123,14 +123,15 @@ The workbook also includes formula-error scans, formula/value inspections, and r
 
 ## Deliverables
 
-- `outputs/medication_sourcing_analysis/Medication_Sourcing_Savings_Analysis.xlsx` - formula-linked Excel model with summary, sensitivity, detailed analysis, matching QA, NDC evidence, manufacturer detail, sources, and native charts
-- `outputs/medication_sourcing_analysis/Medication_Sourcing_One_Page_Memo.pdf` - one-page sourcing memo
-- `sql/medication_sourcing_analysis_bigquery.sql` - 10 commented BigQuery Standard SQL queries
-- `data/processed/analysis_50_drugs.csv` - selected 50-drug analytic table
-- `data/processed/matched_nadac_ndcs.csv` - 443 current NADAC rows retained as match evidence
-- `data/processed/selected_cms_manufacturer_detail.csv` - 223 CMS control/detail rows for selected manufacturer scenarios
-- `qa/analysis_qa.json` and `qa/assertions.txt` - machine-readable and human-readable QA results
-- `outputs/medication_sourcing_analysis/Medication_Sourcing_Portfolio_Package.zip` - compact portfolio package containing the deliverables, processed evidence, source manifest, and QA (raw public files are excluded because the NADAC source is 107 MB)
+The following project files are available in this public GitHub repository:
+
+- [Excel Financial Model](Medication%20Sourcing%20Savings%20Analysis.xlsx) — Formula-linked workbook containing medication-level analysis, sensitivity scenarios, quality-control checks, and charts.
+- [Executive Sourcing Memo](Medication%20Sourcing%20Memo.pdf) — One-page executive summary of findings, modeled opportunities, methodology, and limitations.
+- [BigQuery SQL Scripts](medication_sourcing_analysis_bigquery.sql) — 10 documented BigQuery Standard SQL queries covering data profiling, matching, scenario analysis, and validation.
+- [50-Drug Analysis Dataset](analysis_50_drugs.csv) — Processed dataset containing the 50 selected medication cases.
+- [Source Manifest](source_manifest.csv) — Documentation of official data sources, access dates, and source-file hashes.
+
+**Additional validation:** The original analysis package also contains supporting matching evidence, manufacturer detail, and QA records that are not currently included in this public repository.
 
 ## BigQuery and Tableau status
 
